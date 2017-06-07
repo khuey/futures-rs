@@ -28,7 +28,7 @@ use task_impl::{self, AtomicTask};
 /// Calling `poll` in this state will result in `Ok(Async::Ready(None))` to be
 /// returned. Futures are submitted to the queue using `push`; however, the
 /// future will **not** be polled at this point. `FuturesUnordered` will only
-/// poll managged futures when `FuturesUnordered::poll` is called. As such, it
+/// poll managed futures when `FuturesUnordered::poll` is called. As such, it
 /// is important to call `poll` after pushing new futures.
 ///
 /// If `FuturesUnordered::poll` returns `Ok(Async::Ready(None))` this means that
