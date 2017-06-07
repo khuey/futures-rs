@@ -1,7 +1,7 @@
 use std::prelude::v1::*;
 
+use std::collections::VecDeque;
 use std::fmt;
-use std::mem;
 
 use {Async, IntoFuture, Poll, Future};
 use stream::{Stream, Fuse};
@@ -18,8 +18,8 @@ pub struct Buffered<S>
           S::Item: IntoFuture,
 {
     stream: Fuse<S>,
-    futures: Vec<State<<S::Item as IntoFuture>::Future>>,
-    cur: usize,
+    futures: VecDeque<State<<S::Item as IntoFuture>::Future>>,
+    amt: usize,
 }
 
 impl<S> fmt::Debug for Buffered<S>
@@ -33,14 +33,13 @@ impl<S> fmt::Debug for Buffered<S>
         fmt.debug_struct("Stream")
             .field("stream", &self.stream)
             .field("futures", &self.futures)
-            .field("cur", &self.cur)
+            .field("amt", &self.amt)
             .finish()
     }
 }
 
 #[derive(Debug)]
 enum State<S: Future> {
-    Empty,
     Running(S),
     Finished(Result<S::Item, S::Error>),
 }
@@ -51,8 +50,8 @@ pub fn new<S>(s: S, amt: usize) -> Buffered<S>
 {
     Buffered {
         stream: super::fuse::new(s),
-        futures: (0..amt).map(|_| State::Empty).collect(),
-        cur: 0,
+        futures: VecDeque::new(),
+        amt: amt,
     }
 }
 
@@ -114,21 +113,16 @@ impl<S> Stream for Buffered<S>
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         // First, try to fill in all the futures
-        for i in 0..self.futures.len() {
-            let mut idx = self.cur + i;
-            if idx >= self.futures.len() {
-                idx -= self.futures.len();
-            }
-
-            if let State::Empty = self.futures[idx] {
-                match try!(self.stream.poll()) {
-                    Async::Ready(Some(future)) => {
-                        let future = future.into_future();
-                        self.futures[idx] = State::Running(future);
-                    }
-                    Async::Ready(None) => break,
-                    Async::NotReady => break,
+        let mut futures_to_start = self.amt - self.futures.len();
+        while futures_to_start > 0 {
+            match try!(self.stream.poll()) {
+                Async::Ready(Some(future)) => {
+                    let future = future.into_future();
+                    self.futures.push_back(State::Running(future));
+                    futures_to_start -= 1;
                 }
+                Async::Ready(None) => break,
+                Async::NotReady => break,
             }
         }
 
@@ -148,23 +142,18 @@ impl<S> Stream for Buffered<S>
         }
 
         // Check to see if our current future is done.
-        if let State::Finished(_) = self.futures[self.cur] {
-            let r = match mem::replace(&mut self.futures[self.cur], State::Empty) {
+        if let Some(&State::Finished(_)) = self.futures.front() {
+            let r = match self.futures.pop_front().unwrap() {
                 State::Finished(r) => r,
                 _ => panic!(),
             };
-            self.cur += 1;
-            if self.cur >= self.futures.len() {
-                self.cur = 0;
-            }
             return Ok(Async::Ready(Some(try!(r))))
         }
 
-        if self.stream.is_done() {
-            if let State::Empty = self.futures[self.cur] {
-                return Ok(Async::Ready(None))
-            }
+        if self.stream.is_done() && self.futures.is_empty() {
+            return Ok(Async::Ready(None));
         }
+
         Ok(Async::NotReady)
     }
 }
