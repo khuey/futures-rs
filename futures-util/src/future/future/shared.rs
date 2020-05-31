@@ -7,7 +7,7 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, SeqCst};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 /// Future for the [`shared`](super::FutureExt::shared) method.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
@@ -26,6 +26,9 @@ struct Notifier {
     wakers: Mutex<Option<Slab<Option<Waker>>>>,
 }
 
+/// A weak reference to a `Shared` than can be upgraded much like an `Arc`.
+pub struct WeakShared<Fut: Future>(Weak<Inner<Fut>>);
+
 // The future itself is polled behind the `Arc`, so it won't be moved
 // when `Shared` is moved.
 impl<Fut: Future> Unpin for Shared<Fut> {}
@@ -42,6 +45,12 @@ impl<Fut: Future> fmt::Debug for Shared<Fut> {
 impl<Fut: Future> fmt::Debug for Inner<Fut> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Inner").finish()
+    }
+}
+
+impl<Fut: Future> fmt::Debug for WeakShared<Fut> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WeakShared").finish()
     }
 }
 
@@ -104,6 +113,15 @@ where
                 POISONED => panic!("inner future panicked during poll"),
                 _ => {}
             }
+        }
+        None
+    }
+
+    /// Returns [`Some`] containing a [`WeakShared`] that may later be upgraded back to this [`Shared`]
+    /// or [`None`] if it has already been polled to completion.
+    pub fn downgrade(&self) -> Option<WeakShared<Fut>> {
+        if let Some(inner) = self.inner.as_ref() {
+            return Some(WeakShared(Arc::downgrade(inner)));
         }
         None
     }
@@ -312,5 +330,18 @@ impl ArcWake for Notifier {
                 }
             }
         }
+    }
+}
+
+impl<Fut: Future> WeakShared<Fut>
+{
+    /// Attempts to upgrade this [`WeakShared`] into a [`Shared`]. Returns
+    /// [`None`] if all copies of the [`Shared`] have been dropped or polled
+    /// to completion, otherwise [`Some`]
+    pub fn upgrade(&self) -> Option<Shared<Fut>> {
+        Some(Shared {
+            inner: Some(self.0.upgrade()?),
+            waker_key: NULL_WAKER_KEY,
+        })
     }
 }
